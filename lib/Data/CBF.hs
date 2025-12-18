@@ -2,13 +2,13 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-module Data.CBF (CBFImage (..), readCBF, decompress) where
+module Data.CBF (CBFImage (..), readCBF, decompress, decompressBinaryBSL) where
 
 import Control.Monad (mzero, void, when)
 import Control.Monad.ST (runST)
-import Data.Attoparsec.ByteString.Lazy as A
+import Data.Attoparsec.ByteString.Lazy qualified as A
 import Data.Bifunctor (bimap, first)
-import Data.Binary.Get (getInt16le, getInt32le, getInt64le, runGet)
+import Data.Binary.Get (Decoder (Done, Fail, Partial), Get, getInt16le, getInt32le, getInt64le, getInt8, pushChunks, runGet, runGetIncremental)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BSL
 import Data.Int (Int64, Int8)
@@ -32,7 +32,7 @@ cbfParser :: A.Parser CBFImage
 cbfParser = do
   let takeLine = do
         contents <- A.takeWhile (\x -> x /= 0xd && x /= 0xa)
-        void (string "\r\n")
+        void (A.string "\r\n")
         pure contents
       cbfStartingLine = do
         line <- takeLine
@@ -56,9 +56,46 @@ cbfParser = do
 readCBF :: FilePath -> IO (Either Text.Text CBFImage)
 readCBF fn = do
   c <- BSL.readFile fn
-  pure (first Text.pack (parseOnly cbfParser c))
+  pure (first Text.pack (A.parseOnly cbfParser c))
 
--- decompressST :: Int -> BSL.ByteString -> ST s (MV.STVector s Int64)
+decompressBinary :: (Integral a1, Eq t, Num t, Num a2) => t -> t -> a1 -> Get [a2]
+decompressBinary maxValuesConsumed valuesConsumed currentValue = do
+  if valuesConsumed == maxValuesConsumed
+    then pure []
+    else do
+      delta8 <- getInt8
+      if -127 <= delta8 && delta8 <= 127
+        then do
+          let newValue = currentValue + fromIntegral delta8
+          remainder <- decompressBinary maxValuesConsumed (valuesConsumed + 1) newValue
+          pure (fromIntegral newValue : remainder)
+        else do
+          delta16 <- getInt16le
+          if -32767 <= delta16 && delta16 <= 32767
+            then do
+              let newValue = currentValue + fromIntegral delta16
+              remainder <- decompressBinary maxValuesConsumed (valuesConsumed + 1) newValue
+              pure (fromIntegral newValue : remainder)
+            else do
+              delta32 <- getInt32le
+              if -2147483647 <= delta32 && delta32 <= 2147483647
+                then do
+                  let newValue = currentValue + fromIntegral delta32
+                  remainder <- decompressBinary maxValuesConsumed (valuesConsumed + 1) newValue
+                  pure (fromIntegral newValue : remainder)
+                else do
+                  delta64 <- getInt64le
+                  let newValue = currentValue + fromIntegral delta64
+                  remainder <- decompressBinary maxValuesConsumed (valuesConsumed + 1) newValue
+                  pure (fromIntegral newValue : remainder)
+
+decompressBinaryBSL :: Int64 -> BSL.ByteString -> Either String [Int64]
+decompressBinaryBSL numberOfElements s =
+  case runGetIncremental (decompressBinary numberOfElements 0 0) `pushChunks` s of
+    Fail _ _ e -> Left e
+    Partial _ -> Left "partial?"
+    Done _ _ v -> Right v
+
 decompressST :: (MV.PrimMonad m) => Int -> BSL.ByteString -> m (V.Vector Int64)
 decompressST numberOfElements s = do
   mutableVector <- MV.new numberOfElements
