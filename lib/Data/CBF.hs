@@ -58,7 +58,7 @@ readCBF fn = do
   c <- BSL.readFile fn
   pure (first Text.pack (A.parseOnly cbfParser c))
 
-decompressBinary :: (Integral a1, Eq t, Num t, Num a2) => t -> t -> a1 -> Get [a2]
+decompressBinary :: Int64 -> Int64 -> Int64 -> Get [Int64]
 decompressBinary maxValuesConsumed valuesConsumed currentValue = do
   if valuesConsumed == maxValuesConsumed
     then pure []
