@@ -139,7 +139,7 @@ decompressBinaryBSL numberOfElements s = Right $ decompressBinary numberOfElemen
 decompressST :: (MV.PrimMonad m) => Int -> BSL.ByteString -> m (V.Vector Int64)
 decompressST numberOfElements s = do
   mutableVector <- MV.new numberOfElements
-  _ <- decompressSingleChunk s mutableVector 0 0 0
+  _ <- decompressSingleChunk (BSL.length s) s mutableVector 0 0 0
   V.freeze mutableVector
 
 decompress :: Int -> BSL.ByteString -> V.Vector Int64
@@ -147,14 +147,15 @@ decompress numberOfElements s = runST (decompressST numberOfElements s)
 
 decompressSingleChunk ::
   (MV.PrimMonad m) =>
+  Int64 ->
   BSL.ByteString ->
   MV.MVector (MV.PrimState m) Int64 ->
   Int ->
   Int64 ->
   Int64 ->
   m ()
-decompressSingleChunk s mutableVector outPos inPos value = do
-  if inPos >= BSL.length s - 1
+decompressSingleChunk slen s mutableVector outPos inPos value = do
+  if inPos >= slen - 1
     then pure ()
     else do
       let readInt8 :: Int64 -> Maybe Int64
@@ -164,15 +165,15 @@ decompressSingleChunk s mutableVector outPos inPos value = do
               Just v -> Just (fromIntegral (unsafeCoerce v :: Int8))
           readInt16 :: Int64 -> Maybe Int64
           readInt16 p
-            | p < BSL.length s - 2 = Just $ {-# SCC "read16" #-} fromIntegral (runGet getInt16le (BSL.drop p s))
+            | p < slen - 2 = Just $ {-# SCC "read16" #-} fromIntegral (runGet getInt16le (BSL.drop p s))
             | otherwise = Nothing
           readInt32 :: Int64 -> Maybe Int64
           readInt32 p
-            | p < BSL.length s - 4 = Just $ {-# SCC "read32" #-} fromIntegral (runGet getInt32le (BSL.drop p s))
+            | p < slen - 4 = Just $ {-# SCC "read32" #-} fromIntegral (runGet getInt32le (BSL.drop p s))
             | otherwise = Nothing
           readInt64 :: Int64 -> Maybe Int64
           readInt64 p
-            | p < BSL.length s - 8 = Just $ {-# SCC "read64" #-} fromIntegral (runGet getInt64le (BSL.drop p s))
+            | p < slen - 8 = Just $ {-# SCC "read64" #-} fromIntegral (runGet getInt64le (BSL.drop p s))
             | otherwise = Nothing
           recurse _bitDepth newInPos d = do
             if outPos >= MV.length mutableVector
@@ -181,7 +182,7 @@ decompressSingleChunk s mutableVector outPos inPos value = do
                 {-# SCC "writeV" #-}
                 do
                   MV.write mutableVector outPos (value + d)
-                  decompressSingleChunk s mutableVector (outPos + 1) newInPos (value + d)
+                  decompressSingleChunk slen s mutableVector (outPos + 1) newInPos (value + d)
       case readInt8 inPos of
         Nothing -> pure ()
         Just delta8 ->
