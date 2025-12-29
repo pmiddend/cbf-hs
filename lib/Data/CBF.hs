@@ -1,6 +1,7 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE BangPatterns #-}
 
 module Data.CBF (CBFImage (..), readCBF, decompress, decompressBinaryBSL) where
 
@@ -8,10 +9,12 @@ import Control.Monad (mzero, void, when)
 import Control.Monad.ST (runST)
 import Data.Attoparsec.ByteString.Lazy qualified as A
 import Data.Bifunctor (bimap, first)
-import Data.Binary.Get (Decoder (Done, Fail, Partial), Get, getInt16le, getInt32le, getInt64le, getInt8, pushChunks, runGet, runGetIncremental)
+import Data.Binary.Get (getInt16le, getInt32le, getInt64le, runGet)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BSL
-import Data.Int (Int64, Int8)
+import Data.Int
+import Data.Word
+import Data.Bits
 import Data.Text qualified as Text
 import Data.Text.Encoding (decodeLatin1)
 import Data.Vector.Unboxed qualified as V
@@ -58,43 +61,80 @@ readCBF fn = do
   c <- BSL.readFile fn
   pure (first Text.pack (A.parseOnly cbfParser c))
 
-decompressBinary :: Int64 -> Int64 -> Int64 -> Get [Int64]
-decompressBinary maxValuesConsumed valuesConsumed currentValue = do
-  if valuesConsumed == maxValuesConsumed
-    then pure []
-    else do
-      delta8 <- getInt8
-      if -127 <= delta8 && delta8 <= 127
-        then do
-          let newValue = currentValue + fromIntegral delta8
-          remainder <- decompressBinary maxValuesConsumed (valuesConsumed + 1) newValue
-          pure (fromIntegral newValue : remainder)
-        else do
-          delta16 <- getInt16le
-          if -32767 <= delta16 && delta16 <= 32767
-            then do
-              let newValue = currentValue + fromIntegral delta16
-              remainder <- decompressBinary maxValuesConsumed (valuesConsumed + 1) newValue
-              pure (fromIntegral newValue : remainder)
-            else do
-              delta32 <- getInt32le
-              if -2147483647 <= delta32 && delta32 <= 2147483647
-                then do
-                  let newValue = currentValue + fromIntegral delta32
-                  remainder <- decompressBinary maxValuesConsumed (valuesConsumed + 1) newValue
-                  pure (fromIntegral newValue : remainder)
-                else do
-                  delta64 <- getInt64le
-                  let newValue = currentValue + fromIntegral delta64
-                  remainder <- decompressBinary maxValuesConsumed (valuesConsumed + 1) newValue
-                  pure (fromIntegral newValue : remainder)
+unconsW8 :: BSL.ByteString -> Maybe (Word8, BSL.ByteString)
+unconsW8 = BSL.uncons
 
-decompressBinaryBSL :: Int64 -> BSL.ByteString -> Either String [Int64]
-decompressBinaryBSL numberOfElements s =
-  case runGetIncremental (decompressBinary numberOfElements 0 0) `pushChunks` s of
-    Fail _ _ e -> Left e
-    Partial _ -> Left "partial?"
-    Done _ _ v -> Right v
+unconsW16 :: BSL.ByteString -> Maybe (Word16, BSL.ByteString)
+unconsW16 bs = do
+  (x, bs') <- unconsW8 bs
+  (y, bs'') <- unconsW8 bs'
+  pure (fromIntegral x .|. (fromIntegral y `shiftL` 8), bs'')
+
+unconsW32 :: BSL.ByteString -> Maybe (Word32, BSL.ByteString)
+unconsW32 bs = do
+  (x, bs') <- unconsW16 bs
+  (y, bs'') <- unconsW16 bs'
+  pure (fromIntegral x .|. (fromIntegral y `shiftL` 16), bs'')
+
+unconsW64 :: BSL.ByteString -> Maybe (Word64, BSL.ByteString)
+unconsW64 bs = do
+  (x, bs') <- unconsW32 bs
+  (y, bs'') <- unconsW32 bs'
+  pure (fromIntegral x .|. (fromIntegral y `shiftL` 32), bs'')
+
+unconsI8 :: BSL.ByteString -> Maybe (Int8, BSL.ByteString)
+unconsI8 bs = do
+  (x, bs') <- unconsW8 bs
+  pure (fromIntegral x, bs')
+
+unconsI16 :: BSL.ByteString -> Maybe (Int16, BSL.ByteString)
+unconsI16 bs = do
+  (x, bs') <- unconsW16 bs
+  pure (fromIntegral x, bs')
+
+unconsI32 :: BSL.ByteString -> Maybe (Int32, BSL.ByteString)
+unconsI32 bs = do
+  (x, bs') <- unconsW32 bs
+  pure (fromIntegral x, bs')
+
+unconsI64 :: BSL.ByteString -> Maybe (Int64, BSL.ByteString)
+unconsI64 bs = do
+  (x, bs') <- unconsW64 bs
+  pure (fromIntegral x, bs')
+
+
+decompressBinary :: Int -> Int64 -> BSL.ByteString -> [Int64]
+decompressBinary !0 !_ _ = []
+decompressBinary !i !x bs = do
+  case unconsI8 bs of
+    Nothing -> [] -- fail
+    Just (delta8, bs1)
+      | -127 <= delta8 && delta8 <= 127 ->
+        let !y = x + fromIntegral delta8
+        in y : decompressBinary (i - 1) y bs1
+      | otherwise ->
+        case unconsI16 bs1 of
+          Nothing -> [] -- fail
+          Just (delta16, bs2)
+            | -32767 <= delta16 && delta16 <= 32767 ->
+              let !y = x + fromIntegral delta16
+              in y : decompressBinary (i - 1) y bs2
+            | otherwise ->
+              case unconsI32 bs2 of
+                Nothing -> [] -- fail
+                Just (delta32, bs3)
+                  | -2147483647 <= delta32 && delta32 <= 2147483647 ->
+                    let !y = x + fromIntegral delta32
+                    in y : decompressBinary (i - 1) y bs3
+                  | otherwise ->
+                    case unconsI64 bs3 of
+                      Nothing -> [] -- fail
+                      Just (delta64, bs4) ->
+                        let !y = x + fromIntegral delta64
+                        in y : decompressBinary (i - 1) y bs4
+
+decompressBinaryBSL :: Int -> BSL.ByteString -> Either String [Int64]
+decompressBinaryBSL numberOfElements s = Right $ decompressBinary numberOfElements 0 s
 
 decompressST :: (MV.PrimMonad m) => Int -> BSL.ByteString -> m (V.Vector Int64)
 decompressST numberOfElements s = do

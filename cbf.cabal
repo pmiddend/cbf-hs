@@ -27,7 +27,7 @@ library
     exposed-modules:  Data.CBF
     -- other-modules:
     -- other-extensions:
-    build-depends:    base ^>=4.20.2.0
+    build-depends:    base
                     , attoparsec
                     , text
                     , bytestring
@@ -43,7 +43,7 @@ executable cbf-bench-slow
     hs-source-dirs:   bench
     main-is:          Slow.hs
     build-depends:
-        base ^>=4.20.2.0,
+        base,
         bytestring,
         cbf,
         vector,
@@ -56,7 +56,7 @@ executable cbf-bench-binary
     hs-source-dirs:   bench
     main-is:          Binary.hs
     build-depends:
-        base ^>=4.20.2.0,
+        base,
         bytestring,
         cbf,
         vector,
@@ -70,7 +70,7 @@ test-suite cbf-test
     hs-source-dirs:   test
     main-is:          Main.hs
     build-depends:
-        base ^>=4.20.2.0,
+        base,
         tasty,
         tasty-hunit,
         bytestring,
