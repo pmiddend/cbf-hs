@@ -3,8 +3,7 @@ name:               cbf
 version:            0.1.0.0
 synopsis:
     Bindings to read Crystallographic Binary Files (mostly from detectors)
-
-description:        Parsing routines for the Crystallographic Binary File (CBF) format.
+-- description:        Parsing routines for the Crystallographic Binary File (CBF) format.
 homepage:           https://github.com/pmiddend/cbf-hs
 license:            GPL-3.0-or-later
 license-file:       LICENSE
