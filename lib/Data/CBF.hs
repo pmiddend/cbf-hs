@@ -3,6 +3,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
+-- |
+-- Description : Main interface for reading CBF files
+--
+-- Look at 'readCBF' as a starting point.
 module Data.CBF (CBFImage (..), readCBF, decodePixels) where
 
 import Control.Monad (mzero, void, when)
@@ -22,10 +26,15 @@ import Data.Vector.Unboxed.Mutable qualified as MV
 import Data.Word
 import Unsafe.Coerce (unsafeCoerce)
 
+-- | Decoded CBF image data, with contents
 data CBFImage = CBFImage
-  { imageProperties :: ![(Text.Text, Text.Text)],
+  { -- | Raw image properties, after the binary format section header (not the comments at the begining of the file)
+    imageProperties :: ![(Text.Text, Text.Text)],
+    -- | Fastest image dimension (CBF avoids "x" and "y" or "width"/"height" here)
     imageFastestDimension :: !Int,
+    -- | Second image dimension (CBF avoids "x" and "y" or "width"/"height" here)
     imageSecondDimension :: !Int,
+    -- | Raw image data, to be decoded/decompressed using 'decodePixels'
     imageDataRaw :: !BSL.ByteString
   }
 
@@ -68,6 +77,7 @@ cbfParser = do
       CBFImage properties fastestDimension secondDimension <$> A.takeLazyByteString
     Nothing -> fail ("couldn't extract dimensions from properties")
 
+-- | Read a CBF file, without decoding its contents (see 'decodePixels' for that)
 readCBF :: FilePath -> IO (Either Text.Text CBFImage)
 readCBF fn = do
   c <- BSL.readFile fn
@@ -213,6 +223,7 @@ decompressSingleChunk slen s mutableVector outPos inPos value = do
                           Nothing -> pure ()
                           Just delta64 -> recurse (64 :: Int) (inPos + 11) delta64
 
+-- | Decode the actual pixel values inside the CBF file, possibly decompressing it.
 decodePixels :: CBFImage -> Either String [Int64]
 decodePixels (CBFImage {imageDataRaw, imageFastestDimension, imageSecondDimension}) =
   let numberOfElements = imageFastestDimension * imageSecondDimension
