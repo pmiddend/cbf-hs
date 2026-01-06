@@ -36,19 +36,6 @@ library
     hs-source-dirs:   lib
     default-language: Haskell2010
 
-executable cbf-bench-slow
-    import:           warnings-and-extensions
-    default-language: Haskell2010
-    -- type:             exitcode-stdio-1.0
-    hs-source-dirs:   bench
-    main-is:          Slow.hs
-    build-depends:
-        base,
-        bytestring,
-        cbf,
-        vector,
-        binary
-        
 executable cbf-bench-binary
     import:           warnings-and-extensions
     default-language: Haskell2010

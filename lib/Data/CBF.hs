@@ -1,29 +1,32 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE BangPatterns #-}
 
-module Data.CBF (CBFImage (..), readCBF, decompress, decompressBinaryBSL) where
+module Data.CBF (CBFImage (..), readCBF, decodePixels) where
 
 import Control.Monad (mzero, void, when)
 import Control.Monad.ST (runST)
 import Data.Attoparsec.ByteString.Lazy qualified as A
 import Data.Bifunctor (bimap, first)
 import Data.Binary.Get (getInt16le, getInt32le, getInt64le, runGet)
+import Data.Bits
 import Data.ByteString qualified as BS
+import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as BSL
 import Data.Int
-import Data.Word
-import Data.Bits
 import Data.Text qualified as Text
 import Data.Text.Encoding (decodeLatin1)
 import Data.Vector.Unboxed qualified as V
 import Data.Vector.Unboxed.Mutable qualified as MV
+import Data.Word
 import Unsafe.Coerce (unsafeCoerce)
 
 data CBFImage = CBFImage
   { imageProperties :: ![(Text.Text, Text.Text)],
-    imageData :: !BSL.ByteString
+    imageFastestDimension :: !Int,
+    imageSecondDimension :: !Int,
+    imageDataRaw :: !BSL.ByteString
   }
 
 breakSubstringWithoutDelimiter :: BS.ByteString -> BS.ByteString -> (BS.ByteString, BS.ByteString)
@@ -48,13 +51,22 @@ cbfParser = do
         if BS.null line
           then mzero
           else do
-            when (";" `BS.isSuffixOf` line) (void takeLine)
-            pure (breakSubstringWithoutDelimiter ": " line)
+            -- Example of a suffix:
+            -- Content-Type: application/octet-stream;
+            --      conversions="x-CBF_BYTE_OFFSET"
+            lineSuffix <- if (";" `BS.isSuffixOf` line) then ((<> " ") . BS8.strip) <$> takeLine else pure ""
+            pure (breakSubstringWithoutDelimiter ": " (line <> lineSuffix))
   propertyLines <- A.many1 cbfPropertyLine
   -- the empty line
   void takeLine
   mapM_ A.word8 [0x0c, 0x1a, 0x04, 0xd5]
-  CBFImage (bimap decodeLatin1 decodeLatin1 <$> propertyLines) <$> A.takeLazyByteString
+  let properties = bimap decodeLatin1 decodeLatin1 <$> propertyLines
+      bsToInt :: BS.ByteString -> Maybe Int
+      bsToInt = (fst <$>) . BS8.readInt
+  case (,) <$> (lookup "X-Binary-Size-Fastest-Dimension" propertyLines >>= bsToInt) <*> (lookup "X-Binary-Size-Second-Dimension" propertyLines >>= bsToInt) of
+    Just (fastestDimension, secondDimension) ->
+      CBFImage properties fastestDimension secondDimension <$> A.takeLazyByteString
+    Nothing -> fail ("couldn't extract dimensions from properties")
 
 readCBF :: FilePath -> IO (Either Text.Text CBFImage)
 readCBF fn = do
@@ -102,7 +114,6 @@ unconsI64 bs = do
   (x, bs') <- unconsW64 bs
   pure (fromIntegral x, bs')
 
-
 decompressBinary :: Int -> Int64 -> BSL.ByteString -> [Int64]
 decompressBinary !0 !_ _ = []
 decompressBinary !i !x bs = do
@@ -110,28 +121,28 @@ decompressBinary !i !x bs = do
     Nothing -> [] -- fail
     Just (delta8, bs1)
       | -127 <= delta8 && delta8 <= 127 ->
-        let !y = x + fromIntegral delta8
-        in y : decompressBinary (i - 1) y bs1
+          let !y = x + fromIntegral delta8
+           in y : decompressBinary (i - 1) y bs1
       | otherwise ->
-        case unconsI16 bs1 of
-          Nothing -> [] -- fail
-          Just (delta16, bs2)
-            | -32767 <= delta16 && delta16 <= 32767 ->
-              let !y = x + fromIntegral delta16
-              in y : decompressBinary (i - 1) y bs2
-            | otherwise ->
-              case unconsI32 bs2 of
-                Nothing -> [] -- fail
-                Just (delta32, bs3)
-                  | -2147483647 <= delta32 && delta32 <= 2147483647 ->
-                    let !y = x + fromIntegral delta32
-                    in y : decompressBinary (i - 1) y bs3
-                  | otherwise ->
-                    case unconsI64 bs3 of
-                      Nothing -> [] -- fail
-                      Just (delta64, bs4) ->
-                        let !y = x + fromIntegral delta64
-                        in y : decompressBinary (i - 1) y bs4
+          case unconsI16 bs1 of
+            Nothing -> [] -- fail
+            Just (delta16, bs2)
+              | -32767 <= delta16 && delta16 <= 32767 ->
+                  let !y = x + fromIntegral delta16
+                   in y : decompressBinary (i - 1) y bs2
+              | otherwise ->
+                  case unconsI32 bs2 of
+                    Nothing -> [] -- fail
+                    Just (delta32, bs3)
+                      | -2147483647 <= delta32 && delta32 <= 2147483647 ->
+                          let !y = x + fromIntegral delta32
+                           in y : decompressBinary (i - 1) y bs3
+                      | otherwise ->
+                          case unconsI64 bs3 of
+                            Nothing -> [] -- fail
+                            Just (delta64, bs4) ->
+                              let !y = x + fromIntegral delta64
+                               in y : decompressBinary (i - 1) y bs4
 
 decompressBinaryBSL :: Int -> BSL.ByteString -> Either String [Int64]
 decompressBinaryBSL numberOfElements s = Right $ decompressBinary numberOfElements 0 s
@@ -201,3 +212,8 @@ decompressSingleChunk slen s mutableVector outPos inPos value = do
                         else case readInt64 (inPos + 7) of
                           Nothing -> pure ()
                           Just delta64 -> recurse (64 :: Int) (inPos + 11) delta64
+
+decodePixels :: CBFImage -> Either String [Int64]
+decodePixels (CBFImage {imageDataRaw, imageFastestDimension, imageSecondDimension}) =
+  let numberOfElements = imageFastestDimension * imageSecondDimension
+   in decompressBinaryBSL numberOfElements imageDataRaw
